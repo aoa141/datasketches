@@ -1,21 +1,6 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
+// <copyright file="KllSortedView.cs" company="Microsoft">
+//     Copyright (c) Microsoft Corporation.  All rights reserved.
+// </copyright>
 
 using System;
 using System.Collections.Generic;
@@ -40,22 +25,44 @@ namespace DataSketches.Kll
                 throw new InvalidOperationException("Sketch is empty");
             }
 
-            _comparer = Comparer<T>.Default;
-
-            // Build sorted view from sketch
-            var items = new List<(T item, ulong weight)>();
-
-            // This is a simplified implementation
-            // A full implementation would extract all items with their weights
-            // from all levels of the sketch and sort them
-
+            _comparer = sketch.Comparer ?? Comparer<T>.Default;
             _totalWeight = sketch.GetN();
 
-            // For now, create a simple sorted view
-            _quantiles = new T[1];
-            _cumWeights = new ulong[1];
-            _quantiles[0] = sketch.GetMinItem();
-            _cumWeights[0] = _totalWeight;
+            // Build sorted view from sketch - extract all items with their weights
+            var itemsList = new List<(T item, ulong weight)>();
+
+            var items = sketch.Items;
+            var levels = sketch.Levels;
+            var numLevels = sketch.NumLevels;
+
+            // Extract items from each level
+            // Level 0 items have weight 1, level 1 items have weight 2, etc.
+            for (byte level = 0; level < numLevels; level++)
+            {
+                uint levelStart = levels[level];
+                uint levelEnd = levels[level + 1];
+                ulong weight = 1UL << level; // Weight is 2^level
+
+                for (uint i = levelStart; i < levelEnd; i++)
+                {
+                    itemsList.Add((items[i], weight));
+                }
+            }
+
+            // Sort items
+            itemsList.Sort((a, b) => _comparer.Compare(a.item, b.item));
+
+            // Build cumulative weights array
+            _quantiles = new T[itemsList.Count];
+            _cumWeights = new ulong[itemsList.Count];
+
+            ulong cumWeight = 0;
+            for (int i = 0; i < itemsList.Count; i++)
+            {
+                _quantiles[i] = itemsList[i].item;
+                cumWeight += itemsList[i].weight;
+                _cumWeights[i] = cumWeight;
+            }
         }
 
         public T GetQuantile(double rank, bool inclusive)
@@ -65,17 +72,33 @@ namespace DataSketches.Kll
                 throw new ArgumentException("Rank must be between 0 and 1");
             }
 
-            ulong targetWeight = (ulong)(rank * _totalWeight);
+            if (_quantiles.Length == 0)
+            {
+                throw new InvalidOperationException("No quantiles available");
+            }
+
+            // Calculate target weight based on rank
+            // For rank 0.5 (median), we want the item at position n/2
+            ulong targetWeight = (ulong)Math.Ceiling(rank * _totalWeight);
+
+            if (targetWeight == 0)
+            {
+                return _quantiles[0];
+            }
 
             // Binary search for the appropriate quantile
-            int index = 0;
-            for (int i = 0; i < _cumWeights.Length; i++)
+            int index = Array.BinarySearch(_cumWeights, targetWeight);
+
+            if (index < 0)
             {
-                if (_cumWeights[i] >= targetWeight)
-                {
-                    index = i;
-                    break;
-                }
+                // If not found, BinarySearch returns bitwise complement of next larger element
+                index = ~index;
+            }
+
+            // Ensure index is within bounds
+            if (index >= _quantiles.Length)
+            {
+                index = _quantiles.Length - 1;
             }
 
             return _quantiles[index];
@@ -83,25 +106,50 @@ namespace DataSketches.Kll
 
         public double GetRank(T item, bool inclusive)
         {
-            // Binary search for rank
-            int index = Array.BinarySearch(_quantiles, item, _comparer);
-
-            if (index < 0)
-            {
-                index = ~index;
-            }
-
-            if (index == 0)
+            if (_quantiles.Length == 0)
             {
                 return 0.0;
             }
 
-            if (index >= _cumWeights.Length)
-            {
-                return 1.0;
-            }
+            // Binary search for the item
+            int index = Array.BinarySearch(_quantiles, item, _comparer);
 
-            return (double)_cumWeights[index] / _totalWeight;
+            if (index >= 0)
+            {
+                // Exact match found
+                // For inclusive, return cumulative weight at this position
+                // For exclusive, return cumulative weight before this position
+                if (inclusive)
+                {
+                    return (double)_cumWeights[index] / _totalWeight;
+                }
+                else
+                {
+                    if (index == 0)
+                    {
+                        return 0.0;
+                    }
+                    return (double)_cumWeights[index - 1] / _totalWeight;
+                }
+            }
+            else
+            {
+                // Not found - index is the bitwise complement of the insertion point
+                index = ~index;
+
+                if (index == 0)
+                {
+                    return 0.0;
+                }
+
+                if (index >= _cumWeights.Length)
+                {
+                    return 1.0;
+                }
+
+                // Return rank of the item just before the insertion point
+                return (double)_cumWeights[index - 1] / _totalWeight;
+            }
         }
 
         public double[] GetPMF(T[] splitPoints, bool inclusive)

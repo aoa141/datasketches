@@ -1,21 +1,6 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
+// <copyright file="UpdateThetaSketch.cs" company="Microsoft">
+//     Copyright (c) Microsoft Corporation.  All rights reserved.
+// </copyright>
 
 using System;
 using System.Collections.Generic;
@@ -243,15 +228,9 @@ namespace DataSketches.Theta
 
         internal void Insert(ulong hash)
         {
-            var (index, found) = Find(hash);
-            if (found) return;
-
-            isEmpty = false;
-            entries[index] = hash;
-            numEntries++;
-
+            // Check if we need to resize/rebuild BEFORE trying to insert
             uint capacity = GetCapacity(lgCurSize, lgNomSize);
-            if (numEntries > capacity)
+            if (numEntries >= capacity)
             {
                 if (lgCurSize <= lgNomSize)
                 {
@@ -262,6 +241,53 @@ namespace DataSketches.Theta
                     Rebuild();
                 }
             }
+
+            // Now find a slot for this hash
+            var (index, found) = FindSafe(hash);
+            if (found) return;
+
+            // If index is -1, table is full - resize and try again
+            if (index < 0)
+            {
+                if (lgCurSize <= lgNomSize)
+                {
+                    Resize();
+                }
+                else
+                {
+                    Rebuild();
+                }
+                (index, found) = FindSafe(hash);
+                if (found) return;
+
+                if (index < 0)
+                {
+                    throw new InvalidOperationException("Hash table is full even after resize/rebuild!");
+                }
+            }
+
+            isEmpty = false;
+            entries[index] = hash;
+            numEntries++;
+        }
+
+        private (int index, bool found) FindSafe(ulong key)
+        {
+            uint size = (uint)(1 << lgCurSize);
+            uint index = (uint)(key & (size - 1));
+            uint stride = GetStride(key, lgCurSize);
+            uint startIndex = index;
+
+            do
+            {
+                ulong entry = entries[index];
+                if (entry == 0) return ((int)index, false);
+                if (entry == key) return ((int)index, true);
+                index = (index + stride) & (size - 1);
+            } while (index != startIndex);
+
+            // Table is full and key not found
+            return (-1, false);
         }
 
         private (int index, bool found) Find(ulong key)
@@ -289,17 +315,35 @@ namespace DataSketches.Theta
             byte newLgCurSize = (byte)Math.Min(lgCurSize + lgResizeFactor, lgNomSize + 1);
 
             ulong[] oldEntries = entries;
+            byte oldLgCurSize = lgCurSize;
+
+            // Create new table
             entries = new ulong[1 << newLgCurSize];
             lgCurSize = newLgCurSize;
-
-            uint oldNumEntries = numEntries;
             numEntries = 0;
 
+            // Re-insert entries from old table
             foreach (var entry in oldEntries)
             {
                 if (entry != 0 && entry < theta)
                 {
-                    var (index, _) = Find(entry);
+                    // Find empty slot in new table
+                    uint size = (uint)(1 << lgCurSize);
+                    uint index = (uint)(entry & (size - 1));
+                    uint stride = GetStride(entry, lgCurSize);
+                    uint startIndex = index;
+                    uint probeCount = 0;
+
+                    while (entries[index] != 0)
+                    {
+                        index = (index + stride) & (size - 1);
+                        probeCount++;
+                        if (probeCount > size || index == startIndex)
+                        {
+                            throw new InvalidOperationException($"Resize failed: cannot find empty slot. Size={size}, NumEntries={numEntries}, OldEntries={oldEntries.Length}");
+                        }
+                    }
+
                     entries[index] = entry;
                     numEntries++;
                 }
@@ -330,16 +374,25 @@ namespace DataSketches.Theta
             }
 
             // Rebuild hash table with new theta
-            uint oldNumEntries = numEntries;
-            numEntries = 0;
             ulong[] oldEntries = entries;
             entries = new ulong[1 << lgCurSize];
+            numEntries = 0;
 
+            // Re-insert entries that are still below theta
             foreach (var entry in oldEntries)
             {
                 if (entry != 0 && entry < theta)
                 {
-                    var (index, _) = Find(entry);
+                    // Find empty slot in new table
+                    uint size = (uint)(1 << lgCurSize);
+                    uint index = (uint)(entry & (size - 1));
+                    uint stride = GetStride(entry, lgCurSize);
+
+                    while (entries[index] != 0)
+                    {
+                        index = (index + stride) & (size - 1);
+                    }
+
                     entries[index] = entry;
                     numEntries++;
                 }

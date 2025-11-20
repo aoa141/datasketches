@@ -8,6 +8,10 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
+    <!-- Strong Name Signing -->
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>DataSketches.snk</AssemblyOriginatorKeyFile>
+
     <!-- Package Metadata -->
     <PackageId>Apache.DataSketches</PackageId>
     <Version>1.0.0</Version>

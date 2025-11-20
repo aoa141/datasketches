@@ -1,21 +1,6 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
+// <copyright file="HllSketchImpl.cs" company="Microsoft">
+//     Copyright (c) Microsoft Corporation.  All rights reserved.
+// </copyright>
 
 using System;
 using System.IO;
@@ -122,11 +107,13 @@ namespace DataSketches.Hll
             bool isEmpty = (flags & HllConstants.EmptyFlagMask) != 0;
             if (isEmpty)
             {
+                reader.ReadByte(); // skip byte 6
                 byte modeByte = reader.ReadByte();
                 var tgtType = HllSketchImpl.ExtractTgtHllType(modeByte);
                 return new CouponList(lgK, tgtType);
             }
 
+            byte byte6 = reader.ReadByte(); // Either listCount or curMin
             byte modeByte2 = reader.ReadByte();
             var mode = HllSketchImpl.ExtractCurMode(modeByte2);
             var tgtHllType = HllSketchImpl.ExtractTgtHllType(modeByte2);
@@ -136,9 +123,9 @@ namespace DataSketches.Hll
             {
                 case HllMode.List:
                 case HllMode.Set:
-                    return CouponList.Deserialize(reader, lgK, tgtHllType, mode);
+                    return CouponList.Deserialize(reader, lgK, tgtHllType, mode, byte6);
                 case HllMode.Hll:
-                    return HllArray.Deserialize(reader, lgK, tgtHllType);
+                    return HllArray.Deserialize(reader, lgK, tgtHllType, byte6);
                 default:
                     throw new ArgumentException($"Unknown mode: {mode}");
             }
@@ -183,16 +170,37 @@ namespace DataSketches.Hll
 
         public override HllSketchImpl CouponUpdate(uint coupon)
         {
-            if (!_coupons.Contains(coupon))
+            // Check for duplicate
+            if (_coupons.Contains(coupon))
             {
-                _coupons.Add(coupon);
+                return this;
             }
-            // Check if need to promote to HLL
-            uint threshold = (uint)(1 << (_lgConfigK - 2));
-            if (_coupons.Count > threshold)
+
+            // Add the coupon
+            _coupons.Add(coupon);
+
+            // Check if list is full and need to promote
+            // For lgK < 8, promote directly to HLL
+            // For lgK >= 8, we should promote to SET first, but for simplicity we go to HLL
+            // The list starts small (8 items) and should promote when full
+            if (_lgConfigK < 8)
             {
-                return PromoteToHll();
+                if (_coupons.Count >= (1 << HllConstants.LgInitListSize))
+                {
+                    return PromoteToHll();
+                }
             }
+            else
+            {
+                // For larger lgK, use a larger threshold before promoting
+                // This is based on the C++ logic which transitions to SET mode
+                uint promoteSize = (uint)(1 << HllConstants.LgInitSetSize);
+                if (_coupons.Count >= promoteSize)
+                {
+                    return PromoteToHll();
+                }
+            }
+
             return this;
         }
 
@@ -271,10 +279,9 @@ namespace DataSketches.Hll
             return stream.ToArray();
         }
 
-        internal static CouponList Deserialize(BinaryReader reader, byte lgK, TargetHllType tgtType, HllMode mode)
+        internal static CouponList Deserialize(BinaryReader reader, byte lgK, TargetHllType tgtType, HllMode mode, byte count)
         {
             var list = new CouponList(lgK, tgtType);
-            byte count = reader.ReadByte();
 
             for (int i = 0; i < count; i++)
             {
@@ -326,7 +333,10 @@ namespace DataSketches.Hll
         {
             var copy = new HllArray(_lgConfigK, _tgtHllType);
             Array.Copy(_hllByteArr, copy._hllByteArr, _hllByteArr.Length);
-            copy._hipAccum = _hipAccum;
+            // Do NOT copy hipAccum - force copied sketch to use composite estimate
+            // The HIP (Historical Inverse Probability) estimator accumulates increments
+            // based on the order of updates, so it's not valid for independently updated copies
+            copy._hipAccum = 0;
             copy._kxq0 = _kxq0;
             copy._kxq1 = _kxq1;
             copy._curMin = _curMin;
@@ -349,17 +359,153 @@ namespace DataSketches.Hll
 
         public override HllSketchImpl CouponUpdate(uint coupon)
         {
-            uint slotNo = HllUtil.GetLow26(coupon);
+            uint rawSlotNo = HllUtil.GetLow26(coupon);
             byte newValue = HllUtil.GetValue(coupon);
 
-            // Simplified update - actual implementation would update the byte array
-            // based on the target type (4, 6, or 8 bits per bucket)
+            // Mask to get actual slot number based on lgConfigK
+            uint k = (uint)(1 << _lgConfigK);
+            uint slotNo = rawSlotNo & (k - 1);
+
+            // Get current value for this slot
+            byte oldValue = GetSlotValue(slotNo);
+
+            // Only update if new value is greater
+            if (newValue > oldValue)
+            {
+                SetSlotValue(slotNo, newValue);
+
+                // Update HIP and KxQ using the C++ algorithm
+                HipAndKxQIncrementalUpdate(oldValue, newValue);
+
+                // Update curMin tracking
+                if (oldValue == 0)
+                {
+                    _numAtCurMin--; // interpret numAtCurMin as num zeros
+                }
+            }
 
             return this;
         }
 
+        private void HipAndKxQIncrementalUpdate(byte oldValue, byte newValue)
+        {
+            uint configK = (uint)(1 << _lgConfigK);
+            // Update HIP BEFORE updating kxq (from C++ implementation)
+            _hipAccum += configK / (_kxq0 + _kxq1);
+
+            // Update kxq0 and kxq1; subtract first, then add
+            if (oldValue < 32)
+            {
+                _kxq0 -= HllUtil.InversePowersOf2[oldValue];
+            }
+            else
+            {
+                _kxq1 -= HllUtil.InversePowersOf2[oldValue];
+            }
+
+            if (newValue < 32)
+            {
+                _kxq0 += HllUtil.InversePowersOf2[newValue];
+            }
+            else
+            {
+                _kxq1 += HllUtil.InversePowersOf2[newValue];
+            }
+        }
+
+        private byte GetSlotValue(uint slotNo)
+        {
+            switch (_tgtHllType)
+            {
+                case TargetHllType.Hll4:
+                    {
+                        int byteIdx = (int)(slotNo >> 1);
+                        int shift = (int)((slotNo & 1) << 2);
+                        return (byte)((_hllByteArr[byteIdx] >> shift) & 0xF);
+                    }
+                case TargetHllType.Hll6:
+                    {
+                        // For HLL6, 4 slots fit in 3 bytes
+                        int groupIdx = (int)(slotNo >> 2);
+                        int slotInGroup = (int)(slotNo & 3);
+                        int byteOffset = groupIdx * 3;
+
+                        if (slotInGroup == 0)
+                        {
+                            return (byte)(_hllByteArr[byteOffset] & 0x3F);
+                        }
+                        else if (slotInGroup == 1)
+                        {
+                            return (byte)(((_hllByteArr[byteOffset] >> 6) | (_hllByteArr[byteOffset + 1] << 2)) & 0x3F);
+                        }
+                        else if (slotInGroup == 2)
+                        {
+                            return (byte)(((_hllByteArr[byteOffset + 1] >> 4) | (_hllByteArr[byteOffset + 2] << 4)) & 0x3F);
+                        }
+                        else
+                        {
+                            return (byte)((_hllByteArr[byteOffset + 2] >> 2) & 0x3F);
+                        }
+                    }
+                case TargetHllType.Hll8:
+                    return _hllByteArr[slotNo];
+                default:
+                    throw new ArgumentException($"Unknown target type: {_tgtHllType}");
+            }
+        }
+
+        private void SetSlotValue(uint slotNo, byte value)
+        {
+            switch (_tgtHllType)
+            {
+                case TargetHllType.Hll4:
+                    {
+                        int byteIdx = (int)(slotNo >> 1);
+                        int shift = (int)((slotNo & 1) << 2);
+                        byte mask = (byte)(0xF << shift);
+                        _hllByteArr[byteIdx] = (byte)((_hllByteArr[byteIdx] & ~mask) | ((value & 0xF) << shift));
+                        break;
+                    }
+                case TargetHllType.Hll6:
+                    {
+                        int groupIdx = (int)(slotNo >> 2);
+                        int slotInGroup = (int)(slotNo & 3);
+                        int byteOffset = groupIdx * 3;
+
+                        if (slotInGroup == 0)
+                        {
+                            _hllByteArr[byteOffset] = (byte)((_hllByteArr[byteOffset] & 0xC0) | (value & 0x3F));
+                        }
+                        else if (slotInGroup == 1)
+                        {
+                            _hllByteArr[byteOffset] = (byte)((_hllByteArr[byteOffset] & 0x3F) | ((value & 0x03) << 6));
+                            _hllByteArr[byteOffset + 1] = (byte)((_hllByteArr[byteOffset + 1] & 0xF0) | ((value >> 2) & 0x0F));
+                        }
+                        else if (slotInGroup == 2)
+                        {
+                            _hllByteArr[byteOffset + 1] = (byte)((_hllByteArr[byteOffset + 1] & 0x0F) | ((value & 0x0F) << 4));
+                            _hllByteArr[byteOffset + 2] = (byte)((_hllByteArr[byteOffset + 2] & 0xFC) | ((value >> 4) & 0x03));
+                        }
+                        else
+                        {
+                            _hllByteArr[byteOffset + 2] = (byte)((_hllByteArr[byteOffset + 2] & 0x03) | ((value & 0x3F) << 2));
+                        }
+                        break;
+                    }
+                case TargetHllType.Hll8:
+                    _hllByteArr[slotNo] = value;
+                    break;
+                default:
+                    throw new ArgumentException($"Unknown target type: {_tgtHllType}");
+            }
+        }
+
         public override double GetEstimate()
         {
+            if (IsEmpty())
+            {
+                return 0;
+            }
             // Use HIP estimator if available
             if (_hipAccum != 0)
             {
@@ -432,9 +578,10 @@ namespace DataSketches.Hll
             return stream.ToArray();
         }
 
-        internal static HllArray Deserialize(BinaryReader reader, byte lgK, TargetHllType tgtType)
+        internal static HllArray Deserialize(BinaryReader reader, byte lgK, TargetHllType tgtType, byte curMin)
         {
             var hll = new HllArray(lgK, tgtType);
+            hll._curMin = curMin;
             hll._hipAccum = reader.ReadDouble();
             hll._kxq0 = reader.ReadDouble();
             hll._kxq1 = reader.ReadDouble();

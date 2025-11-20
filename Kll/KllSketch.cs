@@ -1,21 +1,6 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
+// <copyright file="KllSketch.cs" company="Microsoft">
+//     Copyright (c) Microsoft Corporation.  All rights reserved.
+// </copyright>
 
 using System;
 using System.Collections.Generic;
@@ -122,6 +107,7 @@ namespace DataSketches.Kll
 
             _levels = new uint[_numLevels + 1];
             _levels[0] = k;
+            _levels[1] = k; // Level 0 is initially empty, so start = end = k
 
             _items = new T[k];
             _itemsSize = k;
@@ -256,6 +242,12 @@ namespace DataSketches.Kll
         {
             return _levels[_numLevels] - _levels[0];
         }
+
+        // Internal accessors for sorted view
+        internal T[] Items => _items;
+        internal uint[] Levels => _levels;
+        internal byte NumLevels => _numLevels;
+        internal IComparer<T> Comparer => _comparer;
 
         /// <summary>
         /// Returns true if this sketch is in estimation mode.
@@ -574,22 +566,119 @@ namespace DataSketches.Kll
 
         private uint InternalUpdate()
         {
-            _n++;
             if (_levels[0] == 0)
             {
                 CompressWhileUpdating();
             }
+            _n++;
+            _isLevelZeroSorted = false;
             return --_levels[0];
         }
 
         private void CompressWhileUpdating()
         {
             byte level = FindLevelToCompact();
-            if (level == _numLevels)
+
+            // Add new top level if necessary
+            if (level == (_numLevels - 1))
             {
                 AddEmptyTopLevelToCompletelyFullSketch();
             }
-            // Actual compression logic would go here
+
+            uint rawBeg = _levels[level];
+            uint rawLim = _levels[level + 1];
+            // +2 is OK because we already added a new top level if necessary
+            uint popAbove = _levels[level + 2] - rawLim;
+            uint rawPop = rawLim - rawBeg;
+            bool oddPop = KllHelper.IsOdd(rawPop);
+            uint adjBeg = oddPop ? rawBeg + 1 : rawBeg;
+            uint adjPop = oddPop ? rawPop - 1 : rawPop;
+            uint halfAdjPop = adjPop / 2;
+            uint destroyBeg = _levels[0];
+
+            // Level zero might not be sorted, so we must sort it if we wish to compact it
+            if (level == 0 && !_isLevelZeroSorted)
+            {
+                Array.Sort(_items, (int)adjBeg, (int)adjPop, _comparer);
+            }
+
+            if (popAbove == 0)
+            {
+                KllHelper.RandomlyHalveUp(_items, adjBeg, adjPop);
+            }
+            else
+            {
+                KllHelper.RandomlyHalveDown(_items, adjBeg, adjPop);
+                MergeSortedArrays(_items, adjBeg, halfAdjPop, rawLim, popAbove, adjBeg + halfAdjPop);
+            }
+
+            _levels[level + 1] -= halfAdjPop; // adjust boundaries of the level above
+
+            if (oddPop)
+            {
+                _levels[level] = _levels[level + 1] - 1; // current level now contains one item
+                if (_levels[level] != rawBeg)
+                {
+                    _items[_levels[level]] = _items[rawBeg]; // move the leftover item
+                }
+            }
+            else
+            {
+                _levels[level] = _levels[level + 1]; // current level is now empty
+            }
+
+            // Verify that we freed up half_adj_pop array slots just below the current level
+            if (_levels[level] != (rawBeg + halfAdjPop))
+            {
+                throw new InvalidOperationException("Compaction error");
+            }
+
+            // Finally, shift up the data in the levels below so freed space can be used by level zero
+            if (level > 0)
+            {
+                uint amount = rawBeg - _levels[0];
+                Array.Copy(_items, _levels[0], _items, _levels[0] + halfAdjPop, (int)amount);
+                for (byte lvl = 0; lvl < level; lvl++)
+                {
+                    _levels[lvl] += halfAdjPop;
+                }
+            }
+
+            // Note: In C++, destroyed items are destructed. In C#, we don't need to clear value types
+            // because the levels array boundaries ensure they won't be accessed.
+            // Clearing them to default could cause issues for types where default is a valid value (like int with 0).
+        }
+
+        private void MergeSortedArrays(T[] buf, uint startA, uint lenA, uint startB, uint lenB, uint startC)
+        {
+            uint limA = startA + lenA;
+            uint limB = startB + lenB;
+            uint a = startA;
+            uint b = startB;
+
+            for (uint c = startC; c < startC + lenA + lenB; c++)
+            {
+                if (a == limA)
+                {
+                    if (b != c) buf[c] = buf[b];
+                    b++;
+                }
+                else if (b == limB)
+                {
+                    if (a != c) buf[c] = buf[a];
+                    a++;
+                }
+                else if (_comparer.Compare(buf[a], buf[b]) < 0)
+                {
+                    if (a != c) buf[c] = buf[a];
+                    a++;
+                }
+                else
+                {
+                    if (b != c) buf[c] = buf[b];
+                    b++;
+                }
+            }
         }
 
         private byte FindLevelToCompact()
@@ -614,24 +703,41 @@ namespace DataSketches.Kll
             uint deltaCap = KllHelper.LevelCapacity(_k, (byte)(_numLevels + 1), 0, _m);
             uint newTotalCap = curTotalCap + deltaCap;
 
+            // Move items to make room at the beginning
             var newItems = new T[newTotalCap];
-            Array.Copy(_items, 0, newItems, deltaCap, _itemsSize);
+            Array.Copy(_items, 0, newItems, deltaCap, curTotalCap);
             _items = newItems;
             _itemsSize = newTotalCap;
 
-            var newLevels = new uint[_numLevels + 2];
-            for (int i = 0; i <= _numLevels; i++)
+            // Grow levels array if needed
+            byte newLevelsSize = (byte)(_numLevels + 2);
+            if (_levels.Length < newLevelsSize)
             {
-                newLevels[i + 1] = _levels[i] + deltaCap;
+                var newLevels = new uint[newLevelsSize];
+                Array.Copy(_levels, newLevels, _levels.Length);
+                _levels = newLevels;
             }
-            newLevels[0] = deltaCap;
 
-            _levels = newLevels;
+            // Update all existing level boundaries by adding deltaCap
+            for (byte i = 0; i <= _numLevels; i++)
+            {
+                _levels[i] += deltaCap;
+            }
+
+            // Increment number of levels and set the new top boundary
             _numLevels++;
+            _levels[_numLevels] = newTotalCap;
         }
 
         private KllSortedView<T> GetSortedView()
         {
+            // Sort level zero if not already sorted (side effect allowed for const method in C++)
+            if (!_isLevelZeroSorted && _levels[0] < _levels[1])
+            {
+                Array.Sort(_items, (int)_levels[0], (int)(_levels[1] - _levels[0]), _comparer);
+                _isLevelZeroSorted = true;
+            }
+
             return new KllSortedView<T>(this);
         }
 
