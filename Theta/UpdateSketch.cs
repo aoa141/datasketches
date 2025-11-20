@@ -202,7 +202,7 @@ namespace Apache.DataSketches.Theta
         public UpdateReturnState Update(long datum)
         {
             long[] data = { datum };
-            return HashUpdate(MurmurHash3.Hash(data, GetSeed())[0] >> 1);
+            return HashUpdate(MurmurHash3.Hash(data, GetSeed())[0] >>> 1);
         }
 
         /// <summary>
@@ -218,7 +218,7 @@ namespace Apache.DataSketches.Theta
         {
             double d = datum == 0.0 ? 0.0 : datum; // canonicalize -0.0, 0.0
             long[] data = { BitConverter.DoubleToInt64Bits(d) }; // canonicalize all NaN & +/- infinity forms
-            return HashUpdate(MurmurHash3.Hash(data, GetSeed())[0] >> 1);
+            return HashUpdate(MurmurHash3.Hash(data, GetSeed())[0] >>> 1);
         }
 
         /// <summary>
@@ -239,7 +239,7 @@ namespace Apache.DataSketches.Theta
                 return RejectedNullOrEmpty;
             }
             byte[] data = Encoding.UTF8.GetBytes(datum);
-            return HashUpdate(MurmurHash3.Hash(data, GetSeed())[0] >> 1);
+            return HashUpdate(MurmurHash3.Hash(data, GetSeed())[0] >>> 1);
         }
 
         /// <summary>
@@ -254,7 +254,7 @@ namespace Apache.DataSketches.Theta
             {
                 return RejectedNullOrEmpty;
             }
-            return HashUpdate(MurmurHash3.Hash(data, GetSeed())[0] >> 1);
+            return HashUpdate(MurmurHash3.Hash(data, GetSeed())[0] >>> 1);
         }
 
         /// <summary>
@@ -273,7 +273,7 @@ namespace Apache.DataSketches.Theta
             {
                 return RejectedNullOrEmpty;
             }
-            return HashUpdate(MurmurHash3.Hash(data, GetSeed())[0] >> 1);
+            return HashUpdate(MurmurHash3.Hash(data, GetSeed())[0] >>> 1);
         }
 
         /// <summary>
@@ -288,7 +288,7 @@ namespace Apache.DataSketches.Theta
             {
                 return RejectedNullOrEmpty;
             }
-            return HashUpdate(MurmurHash3.Hash(data, GetSeed())[0] >> 1);
+            return HashUpdate(MurmurHash3.Hash(data, GetSeed())[0] >>> 1);
         }
 
         /// <summary>
@@ -303,7 +303,7 @@ namespace Apache.DataSketches.Theta
             {
                 return RejectedNullOrEmpty;
             }
-            return HashUpdate(MurmurHash3.Hash(data, GetSeed())[0] >> 1);
+            return HashUpdate(MurmurHash3.Hash(data, GetSeed())[0] >>> 1);
         }
 
         //restricted methods

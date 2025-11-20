@@ -70,7 +70,7 @@ namespace Apache.DataSketches.Theta
             lgArrLongs_ = ThetaUtil.StartingSubMultiple(lgNomLongs + 1, rf.GetLg(), ThetaUtil.MIN_LG_ARR_LONGS);
             hashTableThreshold_ = GetHashTableThreshold(lgNomLongs, lgArrLongs_);
             curCount_ = 0;
-            thetaLong_ = (long)(p * LONG_MAX_VALUE_AS_DOUBLE);
+            thetaLong_ = (p >= 1.0) ? long.MaxValue : (long)(p * LONG_MAX_VALUE_AS_DOUBLE);
             empty_ = true; // other flags: bigEndian = readOnly = compact = ordered = false;
             cache_ = new long[1 << lgArrLongs_];
         }
@@ -195,7 +195,7 @@ namespace Apache.DataSketches.Theta
             hashTableThreshold_ = GetHashTableThreshold(lgNomLongs_, lgArrLongs_);
             empty_ = true;
             curCount_ = 0;
-            thetaLong_ = (long)(GetP() * LONG_MAX_VALUE_AS_DOUBLE);
+            thetaLong_ = (GetP() >= 1.0) ? long.MaxValue : (long)(GetP() * LONG_MAX_VALUE_AS_DOUBLE);
         }
 
         // Restricted methods

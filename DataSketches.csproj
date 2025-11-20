@@ -13,4 +13,10 @@
     <NoWarn>$(NoWarn);SA1502;SA1307;SA1509;SA1516;SA1116;SA1002;SA1306;SA1633;SA1515;SA1512;SA1309;SA1122;SA1028;SA1311;SA1139;SA1302;SA1304</NoWarn>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Compile Remove="DataSketches.Tests\**" />
+    <EmbeddedResource Remove="DataSketches.Tests\**" />
+    <None Remove="DataSketches.Tests\**" />
+  </ItemGroup>
+
 </Project>
